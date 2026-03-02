@@ -43,22 +43,35 @@ public class Main {
 
         String path = (String) ns.get("path");
         targetPackage = (String) ns.get("target_package");
-        
-        File decompileDir = new File(path, ".java-decompile");
+
+        File inputFile = new File(path);
+        File baseDir;
+
+        if (inputFile.isFile()) {
+            baseDir = inputFile.getParentFile();
+        } else {
+            baseDir = inputFile;
+        }
+
+        File decompileDir = new File(baseDir, ".java-decompile");
         if (!decompileDir.exists()) {
             decompileDir.mkdirs();
         }
-        
+
         System.out.println("Starting decompilation...");
-        System.out.println("Source directory: " + new File(path).getAbsolutePath());
+        System.out.println("Source: " + inputFile.getAbsolutePath());
         System.out.println("Output directory: " + decompileDir.getAbsolutePath());
         if (targetPackage != null) {
             System.out.println("Target package filter: " + targetPackage);
         }
         System.out.println("Thread pool size: " + executor.getCorePoolSize());
         System.out.println();
-        
-        processDirectory(path);
+
+        if (inputFile.isFile()) {
+            processSingleFile(inputFile.getAbsolutePath(), decompileDir.getAbsolutePath());
+        } else {
+            processDirectory(path, decompileDir.getAbsolutePath());
+        }
         
         executor.shutdown();
         try {
@@ -78,22 +91,34 @@ public class Main {
         }
     }
 
-    private static void processDirectory(String path) throws IOException {
+    private static void processSingleFile(String jarPath, String decompilePath) {
+        if (jarPath.endsWith(".jar") || jarPath.endsWith(".war")) {
+            DecompileTask task = new DecompileTask(jarPath, decompilePath, null);
+            try {
+                task.call();
+            } catch (Exception e) {
+                System.err.println("[ERROR] Failed to process file: " + e.getMessage());
+            }
+        } else {
+            System.err.println("[ERROR] File must be a .jar or .war file");
+        }
+    }
+
+    private static void processDirectory(String path, String decompilePath) throws IOException {
         String absolutePath = new File(path).getAbsolutePath();
-        String decompilePath = absolutePath + File.separator + ".java-decompile";
-        
+
         List<Future<?>> futures = new ArrayList<>();
-        
+
         Files.walk(Paths.get(absolutePath))
                 .filter(path1 -> {
                     String strPath = path1.toString();
-                    return !strPath.contains(".java-decompile") 
+                    return !strPath.contains(".java-decompile")
                         && !strPath.contains(".woodpecker")
                         && !strPath.contains("target" + File.separator + "classes");
                 })
                 .forEach(path1 -> {
                     String strPath = path1.toString();
-                    
+
                     if (strPath.endsWith(".jar") || strPath.endsWith(".war")) {
                         DecompileTask task = new DecompileTask(strPath, decompilePath, absolutePath);
                         futures.add(executor.submit(task));
@@ -123,10 +148,9 @@ public class Main {
         @Override
         public Void call() throws Exception {
             if (shouldDecompile(jarPath)) {
-                String targetPath = jarPath.replace(absolutePath, decompilePath);
                 try {
                     boolean isTargetJar = targetPackage == null || containsTargetPackage(jarPath);
-                    DecompileUtil.decompileJar(jarPath, targetPath, isTargetJar);
+                    DecompileUtil.decompileJar(jarPath, decompilePath, isTargetJar, targetPackage);
                     processedCount.incrementAndGet();
                     System.out.println("[DECOMPILED] " + jarPath);
                 } catch (Exception e) {

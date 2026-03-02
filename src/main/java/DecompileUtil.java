@@ -12,8 +12,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 public class DecompileUtil {
-    
+
     public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar) throws IOException {
+        decompileJar(jarPath, outputDir, isTargetJar, null);
+    }
+
+    public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage) throws IOException {
         File output = new File(outputDir);
         output.mkdirs();
         
@@ -66,6 +70,83 @@ public class DecompileUtil {
         
         if (isTargetJar) {
             copyNonClassFiles(jarPath, outputJarDir.getAbsolutePath());
+        }
+
+        // 递归处理嵌套的jar包（如Spring Boot的BOOT-INF/lib/*.jar）
+        extractAndDecompileNestedJars(jarPath, outputDir, targetPackage);
+    }
+
+    private static void extractAndDecompileNestedJars(String jarPath, String outputDir, String targetPackage) throws IOException {
+        List<String> nestedJarPaths = new ArrayList<>();
+
+        try (ZipFile zipFile = new ZipFile(jarPath)) {
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String name = entry.getName();
+
+                // 检查是否是嵌套的jar包
+                if ((name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/"))
+                        && name.endsWith(".jar") && !entry.isDirectory()) {
+                    nestedJarPaths.add(name);
+                }
+            }
+
+            // 提取并反编译嵌套的jar包
+            for (String nestedJarPath : nestedJarPaths) {
+                ZipEntry entry = zipFile.getEntry(nestedJarPath);
+                if (entry == null) continue;
+
+                // 从路径中提取jar文件名（如从 BOOT-INF/lib/spring-boot.jar 提取 spring-boot.jar）
+                String jarFileName = nestedJarPath.substring(nestedJarPath.lastIndexOf('/') + 1);
+
+                // 创建临时文件，使用原始jar名称
+                File tempDir = new File(System.getProperty("java.io.tmpdir"), "decompile-temp");
+                tempDir.mkdirs();
+                File tempJar = new File(tempDir, jarFileName);
+
+                try (InputStream is = zipFile.getInputStream(entry);
+                     FileOutputStream fos = new FileOutputStream(tempJar)) {
+                    byte[] buffer = new byte[4096];
+                    int bytesRead;
+                    while ((bytesRead = is.read(buffer)) != -1) {
+                        fos.write(buffer, 0, bytesRead);
+                    }
+                }
+
+                // 检查是否包含目标package（如果指定了）
+                boolean shouldDecompile = targetPackage == null || containsTargetPackage(tempJar.getAbsolutePath(), targetPackage);
+
+                if (shouldDecompile) {
+                    try {
+                        System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
+                        decompileJar(tempJar.getAbsolutePath(), outputDir, true, targetPackage);
+                    } catch (Exception e) {
+                        System.err.println("[ERROR] Failed to decompile nested jar: " + nestedJarPath + " - " + e.getMessage());
+                    }
+                } else {
+                    System.out.println("[NESTED JAR SKIPPED] " + nestedJarPath + " (does not contain target package)");
+                }
+
+                tempJar.delete();
+            }
+        }
+    }
+
+    private static boolean containsTargetPackage(String jarPath, String targetPackage) {
+        if (targetPackage == null) {
+            return true;
+        }
+
+        String packageName = targetPackage.replace('.', '/');
+        String entryName = packageName + "/";
+
+        try (java.util.jar.JarFile jarFile = new java.util.jar.JarFile(jarPath)) {
+            return jarFile.stream()
+                    .anyMatch(entry -> entry.getName().startsWith(entryName));
+        } catch (IOException e) {
+            return false;
         }
     }
     

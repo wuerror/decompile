@@ -81,7 +81,7 @@ public class Main {
         } catch (InterruptedException e) {
             executor.shutdownNow();
         }
-        
+
         System.out.println();
         System.out.println("Decompilation completed!");
         System.out.println("Processed: " + processedCount.get() + " files");
@@ -89,10 +89,28 @@ public class Main {
         if (failedCount.get() > 0) {
             System.out.println("Failed: " + failedCount.get() + " files");
         }
+
+        // 显式退出程序，避免Vineflower的后台线程阻止退出
+        System.exit(0);
     }
 
     private static void processSingleFile(String jarPath, String decompilePath) {
         if (jarPath.endsWith(".jar") || jarPath.endsWith(".war")) {
+            // 检查是否已经反编译过
+            File jarFile = new File(jarPath);
+            String jarName = jarFile.getName();
+            String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
+            File outputDir = new File(decompilePath, baseName + "_src");
+
+            if (outputDir.exists() && outputDir.isDirectory()) {
+                File[] files = outputDir.listFiles();
+                if (files != null && files.length > 0) {
+                    skippedCount.incrementAndGet();
+                    System.out.println("[ALREADY DECOMPILED] " + jarPath);
+                    return;
+                }
+            }
+
             DecompileTask task = new DecompileTask(jarPath, decompilePath, null);
             try {
                 task.call();
@@ -148,21 +166,47 @@ public class Main {
         @Override
         public Void call() throws Exception {
             if (shouldDecompile(jarPath)) {
+                // 检查是否已经反编译过
+                if (isAlreadyDecompiled(jarPath, decompilePath)) {
+                    skippedCount.incrementAndGet();
+                    System.out.println("[ALREADY DECOMPILED] " + jarPath);
+                    return null;
+                }
+
                 try {
                     boolean isTargetJar = targetPackage == null || containsTargetPackage(jarPath);
                     DecompileUtil.decompileJar(jarPath, decompilePath, isTargetJar, targetPackage);
                     processedCount.incrementAndGet();
                     System.out.println("[DECOMPILED] " + jarPath);
+                } catch (OutOfMemoryError e) {
+                    failedCount.incrementAndGet();
+                    System.err.println("[ERROR] Failed to decompile: " + jarPath + " - Out of memory");
+                    System.err.println("[HINT] Try increasing JVM heap size with: java -Xmx4g -jar decompile.jar ...");
                 } catch (Exception e) {
                     failedCount.incrementAndGet();
                     System.err.println("[ERROR] Failed to decompile: " + jarPath + " - " + e.getMessage());
-                    e.printStackTrace();
                 }
             } else {
                 skippedCount.incrementAndGet();
                 System.out.println("[SKIPPED] " + jarPath);
             }
             return null;
+        }
+
+        private boolean isAlreadyDecompiled(String jarPath, String decompilePath) {
+            File jarFile = new File(jarPath);
+            String jarName = jarFile.getName();
+            String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
+
+            File outputDir = new File(decompilePath, baseName + "_src");
+
+            // 检查输出目录是否存在且不为空
+            if (outputDir.exists() && outputDir.isDirectory()) {
+                File[] files = outputDir.listFiles();
+                return files != null && files.length > 0;
+            }
+
+            return false;
         }
     }
 

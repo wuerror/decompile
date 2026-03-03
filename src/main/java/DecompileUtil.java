@@ -14,10 +14,14 @@ import java.util.zip.ZipFile;
 public class DecompileUtil {
 
     public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar) throws IOException {
-        decompileJar(jarPath, outputDir, isTargetJar, null);
+        decompileJar(jarPath, outputDir, isTargetJar, null, true);
     }
 
     public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage) throws IOException {
+        decompileJar(jarPath, outputDir, isTargetJar, targetPackage, true);
+    }
+
+    private static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage, boolean processNestedJars) throws IOException {
         File output = new File(outputDir);
         output.mkdirs();
         
@@ -39,7 +43,7 @@ public class DecompileUtil {
         options.put(IFernflowerPreferences.FORCE_JSR_INLINE, "1");
         options.put(IFernflowerPreferences.DUMP_BYTECODE_ON_ERROR, "1");
         options.put(IFernflowerPreferences.DUMP_EXCEPTION_ON_ERROR, "1");
-        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "1");
+        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "0");
         options.put(IFernflowerPreferences.DECOMPILE_INNER, "1");
         options.put(IFernflowerPreferences.DECOMPILE_ASSERTIONS, "1");
         options.put(IFernflowerPreferences.HIDE_EMPTY_SUPER, "1");
@@ -47,6 +51,7 @@ public class DecompileUtil {
         options.put(IFernflowerPreferences.DECOMPILE_PREVIEW, "1");
         options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
         options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
+        options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
         
         Fernflower engine = new Fernflower(saver, options, new IFernflowerLogger() {
             @Override
@@ -72,11 +77,13 @@ public class DecompileUtil {
             copyNonClassFiles(jarPath, outputJarDir.getAbsolutePath());
         }
 
-        // 递归处理嵌套的jar包（如Spring Boot的BOOT-INF/lib/*.jar）
-        extractAndDecompileNestedJars(jarPath, outputDir, targetPackage);
+        // 只在顶层jar包时递归处理嵌套的jar包（如Spring Boot的BOOT-INF/lib/*.jar）
+        if (processNestedJars) {
+            extractAndDecompileNestedJars(jarPath, outputJarDir.getAbsolutePath(), targetPackage);
+        }
     }
 
-    private static void extractAndDecompileNestedJars(String jarPath, String outputDir, String targetPackage) throws IOException {
+    private static void extractAndDecompileNestedJars(String jarPath, String parentOutputDir, String targetPackage) throws IOException {
         List<String> nestedJarPaths = new ArrayList<>();
 
         try (ZipFile zipFile = new ZipFile(jarPath)) {
@@ -101,6 +108,9 @@ public class DecompileUtil {
                 // 从路径中提取jar文件名（如从 BOOT-INF/lib/spring-boot.jar 提取 spring-boot.jar）
                 String jarFileName = nestedJarPath.substring(nestedJarPath.lastIndexOf('/') + 1);
 
+                // 提取目录路径（如从 BOOT-INF/lib/spring-boot.jar 提取 BOOT-INF/lib）
+                String dirPath = nestedJarPath.substring(0, nestedJarPath.lastIndexOf('/'));
+
                 // 创建临时文件，使用原始jar名称
                 File tempDir = new File(System.getProperty("java.io.tmpdir"), "decompile-temp");
                 tempDir.mkdirs();
@@ -121,7 +131,13 @@ public class DecompileUtil {
                 if (shouldDecompile) {
                     try {
                         System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
-                        decompileJar(tempJar.getAbsolutePath(), outputDir, true, targetPackage);
+
+                        // 在父jar包输出目录下创建对应的目录结构
+                        File nestedOutputDir = new File(parentOutputDir, dirPath);
+                        nestedOutputDir.mkdirs();
+
+                        // 嵌套jar包不再递归处理其内部的jar包，避免无限递归
+                        decompileJarToSpecificDir(tempJar.getAbsolutePath(), nestedOutputDir.getAbsolutePath(), jarFileName, true, targetPackage);
                     } catch (Exception e) {
                         System.err.println("[ERROR] Failed to decompile nested jar: " + nestedJarPath + " - " + e.getMessage());
                     }
@@ -131,6 +147,62 @@ public class DecompileUtil {
 
                 tempJar.delete();
             }
+        }
+    }
+
+    private static void decompileJarToSpecificDir(String jarPath, String outputDir, String jarFileName, boolean isTargetJar, String targetPackage) throws IOException {
+        File output = new File(outputDir);
+        output.mkdirs();
+
+        File jarFile = new File(jarPath);
+        String baseName = jarFileName.endsWith(".war") ? jarFileName.replace(".war", "") : jarFileName.replace(".jar", "");
+        File outputJarDir = new File(outputDir, baseName + "_src");
+        outputJarDir.mkdirs();
+
+        IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
+
+        Map<String, Object> options = new HashMap<>();
+        options.put(IFernflowerPreferences.REMOVE_BRIDGE, "0");
+        options.put(IFernflowerPreferences.DUMP_CODE_LINES, "1");
+        options.put(IFernflowerPreferences.IGNORE_INVALID_BYTECODE, "1");
+        options.put(IFernflowerPreferences.VERIFY_ANONYMOUS_CLASSES, "0");
+        options.put(IFernflowerPreferences.INCLUDE_ENTIRE_CLASSPATH, "0");
+        options.put(IFernflowerPreferences.TERNARY_CONDITIONS, "1");
+        options.put(IFernflowerPreferences.FORCE_JSR_INLINE, "1");
+        options.put(IFernflowerPreferences.DUMP_BYTECODE_ON_ERROR, "1");
+        options.put(IFernflowerPreferences.DUMP_EXCEPTION_ON_ERROR, "1");
+        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "0");
+        options.put(IFernflowerPreferences.DECOMPILE_INNER, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_ASSERTIONS, "1");
+        options.put(IFernflowerPreferences.HIDE_EMPTY_SUPER, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_ENUM, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_PREVIEW, "1");
+        options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
+        options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
+
+        Fernflower engine = new Fernflower(saver, options, new IFernflowerLogger() {
+            @Override
+            public void writeMessage(String message, Severity severity) {
+                if (severity == Severity.ERROR) {
+                    System.err.println("[Vineflower] " + message);
+                }
+            }
+
+            @Override
+            public void writeMessage(String message, Severity severity, Throwable t) {
+                if (severity == Severity.ERROR) {
+                    System.err.println("[Vineflower] " + message + " - " + t.getMessage());
+                }
+            }
+        });
+
+        engine.addSource(jarFile);
+        engine.decompileContext();
+        engine.clearContext();
+
+        if (isTargetJar) {
+            copyNonClassFiles(jarPath, outputJarDir.getAbsolutePath());
         }
     }
 
@@ -153,17 +225,19 @@ public class DecompileUtil {
     private static void copyNonClassFiles(String jarPath, String outputDir) throws IOException {
         try (ZipFile zipFile = new ZipFile(jarPath)) {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
-            
+
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
-                
-                if (name.endsWith(".class") || name.endsWith("/") || 
+
+                // 跳过class文件、目录、META-INF和嵌套的jar包
+                if (name.endsWith(".class") || name.endsWith("/") ||
                     name.equals("META-INF/") || name.startsWith("META-INF/MANIFEST.MF") ||
-                    name.startsWith("META-INF/")) {
+                    name.startsWith("META-INF/") ||
+                    (name.endsWith(".jar") && (name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/")))) {
                     continue;
                 }
-                
+
                 File outputFile = new File(outputDir, name);
                 if (!entry.isDirectory()) {
                     outputFile.getParentFile().mkdirs();

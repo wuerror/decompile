@@ -156,6 +156,7 @@ public class Main {
                 } catch (Exception e) {
                     failedCount.incrementAndGet();
                     System.err.println("[ERROR] Failed to decompile: " + jarPath + " - " + e.getMessage());
+                    e.printStackTrace();
                 }
             } else {
                 skippedCount.incrementAndGet();

@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 public class Main {
     private static String targetPackage = null;
@@ -45,32 +46,36 @@ public class Main {
         targetPackage = (String) ns.get("target_package");
 
         File inputFile = new File(path);
-        File baseDir;
+        boolean handledClassInput = processClassInputIfNeeded(inputFile);
 
-        if (inputFile.isFile()) {
-            baseDir = inputFile.getParentFile();
-        } else {
-            baseDir = inputFile;
-        }
+        if (!handledClassInput) {
+            File baseDir;
 
-        File decompileDir = new File(baseDir, ".java-decompile");
-        if (!decompileDir.exists()) {
-            decompileDir.mkdirs();
-        }
+            if (inputFile.isFile()) {
+                baseDir = inputFile.getParentFile();
+            } else {
+                baseDir = inputFile;
+            }
 
-        System.out.println("Starting decompilation...");
-        System.out.println("Source: " + inputFile.getAbsolutePath());
-        System.out.println("Output directory: " + decompileDir.getAbsolutePath());
-        if (targetPackage != null) {
-            System.out.println("Target package filter: " + targetPackage);
-        }
-        System.out.println("Thread pool size: " + executor.getCorePoolSize());
-        System.out.println();
+            File decompileDir = new File(baseDir, ".java-decompile");
+            if (!decompileDir.exists()) {
+                decompileDir.mkdirs();
+            }
 
-        if (inputFile.isFile()) {
-            processSingleFile(inputFile.getAbsolutePath(), decompileDir.getAbsolutePath());
-        } else {
-            processDirectory(path, decompileDir.getAbsolutePath());
+            System.out.println("Starting decompilation...");
+            System.out.println("Source: " + inputFile.getAbsolutePath());
+            System.out.println("Output directory: " + decompileDir.getAbsolutePath());
+            if (targetPackage != null) {
+                System.out.println("Target package filter: " + targetPackage);
+            }
+            System.out.println("Thread pool size: " + executor.getCorePoolSize());
+            System.out.println();
+
+            if (inputFile.isFile()) {
+                processSingleFile(inputFile.getAbsolutePath(), decompileDir.getAbsolutePath());
+            } else {
+                processDirectory(path, decompileDir.getAbsolutePath());
+            }
         }
         
         executor.shutdown();
@@ -150,6 +155,87 @@ public class Main {
                 System.err.println("[ERROR] Task execution failed: " + e.getMessage());
             }
         }
+    }
+
+    private static boolean processClassInputIfNeeded(File inputFile) throws IOException {
+        if (inputFile.isFile() && inputFile.getName().endsWith(".class")) {
+            processClassFile(inputFile);
+            return true;
+        }
+
+        if (inputFile.isDirectory()) {
+            DirectoryScanResult scanResult = analyzeDirectory(inputFile.toPath());
+            if (!scanResult.hasArchives && scanResult.classCount > 0) {
+                processClassDirectory(inputFile, scanResult.classCount);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void processClassFile(File classFile) {
+        File parent = classFile.getParentFile();
+        String output = parent == null ? new File(".").getAbsolutePath() : parent.getAbsolutePath();
+
+        System.out.println("Starting class decompilation...");
+        System.out.println("Source: " + classFile.getAbsolutePath());
+        System.out.println("Output directory: " + output);
+        if (targetPackage != null) {
+            System.out.println("Target package filter: " + targetPackage);
+        }
+        System.out.println();
+
+        try {
+            DecompileUtil.decompileClassFileInPlace(classFile.getAbsolutePath());
+            processedCount.incrementAndGet();
+            System.out.println("[DECOMPILED CLASS] " + classFile.getAbsolutePath());
+        } catch (Exception e) {
+            failedCount.incrementAndGet();
+            System.err.println("[ERROR] Failed to decompile class: " + classFile.getAbsolutePath() + " - " + e.getMessage());
+        }
+    }
+
+    private static void processClassDirectory(File directory, int classCount) {
+        System.out.println("Starting class directory decompilation...");
+        System.out.println("Source: " + directory.getAbsolutePath());
+        System.out.println("Output directory: " + directory.getAbsolutePath());
+        if (targetPackage != null) {
+            System.out.println("Target package filter: " + targetPackage);
+        }
+        System.out.println();
+
+        try {
+            DecompileUtil.decompileClassDirectoryInPlace(directory.getAbsolutePath());
+            processedCount.addAndGet(classCount);
+            System.out.println("[DECOMPILED CLASS DIR] " + directory.getAbsolutePath() + " (" + classCount + " classes)");
+        } catch (Exception e) {
+            failedCount.incrementAndGet();
+            System.err.println("[ERROR] Failed to decompile directory: " + directory.getAbsolutePath() + " - " + e.getMessage());
+        }
+    }
+
+    private static DirectoryScanResult analyzeDirectory(Path directoryPath) throws IOException {
+        DirectoryScanResult result = new DirectoryScanResult();
+
+        try (Stream<Path> stream = Files.walk(directoryPath)) {
+            stream.filter(Files::isRegularFile)
+                    .forEach(path -> {
+                        String strPath = path.toString();
+                        if (strPath.endsWith(".jar") || strPath.endsWith(".war")) {
+                            result.hasArchives = true;
+                        } else if (strPath.endsWith(".class")) {
+                            result.classCount++;
+                        }
+                    });
+        }
+
+        return result;
+    }
+
+    private static class DirectoryScanResult {
+        private boolean hasArchives;
+        private int classCount;
     }
 
     private static class DecompileTask implements Callable<Void> {

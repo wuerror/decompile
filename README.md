@@ -9,6 +9,7 @@
 - ✅ **多线程并行处理**: 自动使用 CPU 核心数提升反编译效率
 - ✅ **-tp 参数过滤**: 仅反编译包含目标包的 JAR，第三方库不移入输出目录
 - ✅ **智能目录跳过**: 自动跳过 `.java-decompile`、`.woodpecker`、`target/classes` 目录
+- ✅ **直读 .class**: 支持单个 `.class` 或仅包含 `.class` 的目录，结果直接写回原目录
 
 ## 快速开始
 
@@ -38,6 +39,16 @@ java -jar target/decompile-1.0-SNAPSHOT.jar D:\path\to\libs -tp com.example.myap
 
 ```bash
 java -jar target/decompile-1.0-SNAPSHOT.jar D:\path\to\libs --target-package com.example.myapp
+```
+
+**3. 直接反编译 `.class` 文件或 class 输出目录（结果写回原目录，不创建 `.java-decompile`）：**
+
+```bash
+# 单个 .class
+java -jar target/decompile-1.0-SNAPSHOT.jar D:\path\to\Foo.class
+
+# 仅包含 .class 的目录（如 target/classes）
+java -jar target/decompile-1.0-SNAPSHOT.jar D:\path\to\classes
 ```
 
 ### -tp 参数说明

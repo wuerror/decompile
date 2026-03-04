@@ -5,11 +5,13 @@ import org.jetbrains.java.decompiler.main.extern.IResultSaver;
 
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.util.stream.Stream;
 
 public class DecompileUtil {
 
@@ -32,42 +34,7 @@ public class DecompileUtil {
         outputJarDir.mkdirs();
         
         IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
-        
-        Map<String, Object> options = new HashMap<>();
-        options.put(IFernflowerPreferences.REMOVE_BRIDGE, "0");
-        options.put(IFernflowerPreferences.DUMP_CODE_LINES, "1");
-        options.put(IFernflowerPreferences.IGNORE_INVALID_BYTECODE, "1");
-        options.put(IFernflowerPreferences.VERIFY_ANONYMOUS_CLASSES, "0");
-        options.put(IFernflowerPreferences.INCLUDE_ENTIRE_CLASSPATH, "0");
-        options.put(IFernflowerPreferences.TERNARY_CONDITIONS, "1");
-        options.put(IFernflowerPreferences.FORCE_JSR_INLINE, "1");
-        options.put(IFernflowerPreferences.DUMP_BYTECODE_ON_ERROR, "1");
-        options.put(IFernflowerPreferences.DUMP_EXCEPTION_ON_ERROR, "1");
-        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "0");
-        options.put(IFernflowerPreferences.DECOMPILE_INNER, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_ASSERTIONS, "1");
-        options.put(IFernflowerPreferences.HIDE_EMPTY_SUPER, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_ENUM, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_PREVIEW, "1");
-        options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
-        options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
-        
-        Fernflower engine = new Fernflower(saver, options, new IFernflowerLogger() {
-            @Override
-            public void writeMessage(String message, Severity severity) {
-                if (severity == Severity.ERROR) {
-                    System.err.println("[Vineflower] " + message);
-                }
-            }
-
-            @Override
-            public void writeMessage(String message, Severity severity, Throwable t) {
-                if (severity == Severity.ERROR) {
-                    System.err.println("[Vineflower] " + message + " - " + t.getMessage());
-                }
-            }
-        });
+        Fernflower engine = createFernflower(saver);
         
         engine.addSource(jarFile);
         engine.decompileContext();
@@ -160,42 +127,7 @@ public class DecompileUtil {
         outputJarDir.mkdirs();
 
         IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
-
-        Map<String, Object> options = new HashMap<>();
-        options.put(IFernflowerPreferences.REMOVE_BRIDGE, "0");
-        options.put(IFernflowerPreferences.DUMP_CODE_LINES, "1");
-        options.put(IFernflowerPreferences.IGNORE_INVALID_BYTECODE, "1");
-        options.put(IFernflowerPreferences.VERIFY_ANONYMOUS_CLASSES, "0");
-        options.put(IFernflowerPreferences.INCLUDE_ENTIRE_CLASSPATH, "0");
-        options.put(IFernflowerPreferences.TERNARY_CONDITIONS, "1");
-        options.put(IFernflowerPreferences.FORCE_JSR_INLINE, "1");
-        options.put(IFernflowerPreferences.DUMP_BYTECODE_ON_ERROR, "1");
-        options.put(IFernflowerPreferences.DUMP_EXCEPTION_ON_ERROR, "1");
-        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "0");
-        options.put(IFernflowerPreferences.DECOMPILE_INNER, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_ASSERTIONS, "1");
-        options.put(IFernflowerPreferences.HIDE_EMPTY_SUPER, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_ENUM, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_PREVIEW, "1");
-        options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
-        options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
-        options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
-
-        Fernflower engine = new Fernflower(saver, options, new IFernflowerLogger() {
-            @Override
-            public void writeMessage(String message, Severity severity) {
-                if (severity == Severity.ERROR) {
-                    System.err.println("[Vineflower] " + message);
-                }
-            }
-
-            @Override
-            public void writeMessage(String message, Severity severity, Throwable t) {
-                if (severity == Severity.ERROR) {
-                    System.err.println("[Vineflower] " + message + " - " + t.getMessage());
-                }
-            }
-        });
+        Fernflower engine = createFernflower(saver);
 
         engine.addSource(jarFile);
         engine.decompileContext();
@@ -219,6 +151,58 @@ public class DecompileUtil {
                     .anyMatch(entry -> entry.getName().startsWith(entryName));
         } catch (IOException e) {
             return false;
+        }
+    }
+
+    public static void decompileClassFileInPlace(String classPath) throws IOException {
+        File classFile = new File(classPath);
+        if (!classFile.exists() || !classFile.isFile()) {
+            throw new FileNotFoundException("Class file not found: " + classPath);
+        }
+
+        File outputDir = classFile.getParentFile();
+        if (outputDir == null) {
+            outputDir = new File(".");
+        }
+
+        decompileSourcesInPlace(Collections.singletonList(classFile), outputDir);
+    }
+
+    public static void decompileClassDirectoryInPlace(String directoryPath) throws IOException {
+        File dir = new File(directoryPath);
+        if (!dir.exists() || !dir.isDirectory()) {
+            throw new IOException("Directory not found: " + directoryPath);
+        }
+
+        List<File> classFiles = new ArrayList<>();
+        try (Stream<Path> stream = Files.walk(dir.toPath())) {
+            stream.filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".class"))
+                    .forEach(path -> classFiles.add(path.toFile()));
+        }
+
+        if (classFiles.isEmpty()) {
+            throw new IOException("No .class files found under directory: " + directoryPath);
+        }
+
+        decompileSourcesInPlace(classFiles, dir);
+    }
+
+    private static void decompileSourcesInPlace(List<File> sources, File outputDir) throws IOException {
+        if (sources.isEmpty()) {
+            return;
+        }
+
+        try {
+            IResultSaver saver = new ConsoleResultSaver(outputDir.getAbsolutePath());
+            Fernflower engine = createFernflower(saver);
+            for (File source : sources) {
+                engine.addSource(source);
+            }
+            engine.decompileContext();
+            engine.clearContext();
+        } catch (Exception | OutOfMemoryError e) {
+            throw new IOException("Decompilation failed: " + e.getMessage(), e);
         }
     }
     
@@ -254,6 +238,44 @@ public class DecompileUtil {
                 }
             }
         }
+    }
+
+    private static Fernflower createFernflower(IResultSaver saver) {
+        Map<String, Object> options = new HashMap<>();
+        options.put(IFernflowerPreferences.REMOVE_BRIDGE, "0");
+        options.put(IFernflowerPreferences.DUMP_CODE_LINES, "1");
+        options.put(IFernflowerPreferences.IGNORE_INVALID_BYTECODE, "1");
+        options.put(IFernflowerPreferences.VERIFY_ANONYMOUS_CLASSES, "0");
+        options.put(IFernflowerPreferences.INCLUDE_ENTIRE_CLASSPATH, "0");
+        options.put(IFernflowerPreferences.TERNARY_CONDITIONS, "1");
+        options.put(IFernflowerPreferences.FORCE_JSR_INLINE, "1");
+        options.put(IFernflowerPreferences.DUMP_BYTECODE_ON_ERROR, "1");
+        options.put(IFernflowerPreferences.DUMP_EXCEPTION_ON_ERROR, "1");
+        options.put(IFernflowerPreferences.DECOMPILER_COMMENTS, "0");
+        options.put(IFernflowerPreferences.DECOMPILE_INNER, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_ASSERTIONS, "1");
+        options.put(IFernflowerPreferences.HIDE_EMPTY_SUPER, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_ENUM, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_PREVIEW, "1");
+        options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
+        options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
+        options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
+
+        return new Fernflower(saver, options, new IFernflowerLogger() {
+            @Override
+            public void writeMessage(String message, Severity severity) {
+                if (severity == Severity.ERROR) {
+                    System.err.println("[Vineflower] " + message);
+                }
+            }
+
+            @Override
+            public void writeMessage(String message, Severity severity, Throwable t) {
+                if (severity == Severity.ERROR) {
+                    System.err.println("[Vineflower] " + message + " - " + t.getMessage());
+                }
+            }
+        });
     }
     
     private static class ConsoleResultSaver implements IResultSaver {

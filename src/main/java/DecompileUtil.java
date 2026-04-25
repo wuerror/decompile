@@ -7,117 +7,218 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.jar.Manifest;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import java.util.stream.Stream;
+import java.util.zip.ZipInputStream;
 
 public class DecompileUtil {
-
     public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar) throws IOException {
-        decompileJar(jarPath, outputDir, isTargetJar, null, true);
+        decompileJar(jarPath, outputDir, isTargetJar, null, 1);
     }
 
     public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage) throws IOException {
-        decompileJar(jarPath, outputDir, isTargetJar, targetPackage, true);
+        decompileJar(jarPath, outputDir, isTargetJar, targetPackage, 1);
     }
 
-    private static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage, boolean processNestedJars) throws IOException {
+    public static void decompileJar(String jarPath, String outputDir, boolean isTargetJar, String targetPackage, int threadCount) throws IOException {
+        decompileJar(jarPath, outputDir, isTargetJar, targetPackage, threadCount, true);
+    }
+
+    private static void decompileJar(
+            String jarPath,
+            String outputDir,
+            boolean isTargetJar,
+            String targetPackage,
+            int threadCount,
+            boolean processNestedJars
+    ) throws IOException {
         File output = new File(outputDir);
         output.mkdirs();
-        
+
         File jarFile = new File(jarPath);
         String jarName = jarFile.getName();
         String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
         File outputJarDir = new File(outputDir, baseName + "_src");
         outputJarDir.mkdirs();
-        
-        IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
-        Fernflower engine = createFernflower(saver);
-        
-        engine.addSource(jarFile);
-        engine.decompileContext();
-        engine.clearContext();
-        
+
+        if (targetPackage != null) {
+            decompileJarFiltered(jarFile, outputJarDir, targetPackage, threadCount);
+        } else {
+            IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
+            Fernflower engine = createFernflower(saver, threadCount);
+            try {
+                engine.addSource(jarFile);
+                engine.decompileContext();
+            } finally {
+                engine.clearContext();
+            }
+        }
+
         if (isTargetJar) {
             copyNonClassFiles(jarPath, outputJarDir.getAbsolutePath());
         }
 
-        // 只在顶层jar包时递归处理嵌套的jar包（如Spring Boot的BOOT-INF/lib/*.jar）
         if (processNestedJars) {
-            extractAndDecompileNestedJars(jarPath, outputJarDir.getAbsolutePath(), targetPackage);
+            extractAndDecompileNestedJars(jarPath, outputJarDir.getAbsolutePath(), targetPackage, threadCount);
         }
     }
 
-    private static void extractAndDecompileNestedJars(String jarPath, String parentOutputDir, String targetPackage) throws IOException {
+    private static void decompileJarFiltered(File jarFile, File outputJarDir, String targetPackage, int threadCount) throws IOException {
+        String pkg = targetPackage.replace('.', '/') + "/";
+        String[] prefixes = {pkg, "BOOT-INF/classes/" + pkg, "WEB-INF/classes/" + pkg};
+
+        Path tempDir = Files.createTempDirectory("decompile-filter-");
+        try {
+            int count = 0;
+            try (ZipFile zip = new ZipFile(jarFile)) {
+                Enumeration<? extends ZipEntry> entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    String name = entry.getName();
+                    if (!name.endsWith(".class")) {
+                        continue;
+                    }
+
+                    String stripped = null;
+                    for (String p : prefixes) {
+                        if (name.startsWith(p)) {
+                            stripped = name.substring(p.length() - pkg.length());
+                            break;
+                        }
+                    }
+                    if (stripped == null) {
+                        continue;
+                    }
+
+                    Path dest = tempDir.resolve(stripped);
+                    Files.createDirectories(dest.getParent());
+                    try (InputStream is = zip.getInputStream(entry)) {
+                        Files.copy(is, dest, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    count++;
+                }
+            }
+
+            if (count == 0) {
+                return;
+            }
+
+            IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
+            Fernflower engine = createFernflower(saver, threadCount);
+            try {
+                engine.addSource(tempDir.toFile());
+                engine.decompileContext();
+            } finally {
+                engine.clearContext();
+            }
+        } finally {
+            deleteRecursively(tempDir);
+        }
+    }
+
+    private static void deleteRecursively(Path path) {
+        if (!Files.exists(path)) {
+            return;
+        }
+        try (Stream<Path> walk = Files.walk(path)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignore) {
+                }
+            });
+        } catch (IOException ignore) {
+        }
+    }
+
+    private static void extractAndDecompileNestedJars(String jarPath, String parentOutputDir, String targetPackage, int threadCount) throws IOException {
         List<String> nestedJarPaths = new ArrayList<>();
+        File tempDir = new File(System.getProperty("java.io.tmpdir"), "decompile-temp-" + Thread.currentThread().getId());
 
-        try (ZipFile zipFile = new ZipFile(jarPath)) {
-            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+        try {
+            try (ZipFile zipFile = new ZipFile(jarPath)) {
+                Enumeration<? extends ZipEntry> entries = zipFile.entries();
 
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    String name = entry.getName();
 
-                // 检查是否是嵌套的jar包
-                if ((name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/"))
-                        && name.endsWith(".jar") && !entry.isDirectory()) {
-                    nestedJarPaths.add(name);
-                }
-            }
-
-            // 提取并反编译嵌套的jar包
-            for (String nestedJarPath : nestedJarPaths) {
-                ZipEntry entry = zipFile.getEntry(nestedJarPath);
-                if (entry == null) continue;
-
-                // 从路径中提取jar文件名（如从 BOOT-INF/lib/spring-boot.jar 提取 spring-boot.jar）
-                String jarFileName = nestedJarPath.substring(nestedJarPath.lastIndexOf('/') + 1);
-
-                // 提取目录路径（如从 BOOT-INF/lib/spring-boot.jar 提取 BOOT-INF/lib）
-                String dirPath = nestedJarPath.substring(0, nestedJarPath.lastIndexOf('/'));
-
-                // 创建临时文件，使用原始jar名称
-                File tempDir = new File(System.getProperty("java.io.tmpdir"), "decompile-temp");
-                tempDir.mkdirs();
-                File tempJar = new File(tempDir, jarFileName);
-
-                try (InputStream is = zipFile.getInputStream(entry);
-                     FileOutputStream fos = new FileOutputStream(tempJar)) {
-                    byte[] buffer = new byte[4096];
-                    int bytesRead;
-                    while ((bytesRead = is.read(buffer)) != -1) {
-                        fos.write(buffer, 0, bytesRead);
+                    if ((name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/"))
+                            && name.endsWith(".jar") && !entry.isDirectory()) {
+                        nestedJarPaths.add(name);
                     }
                 }
 
-                // 检查是否包含目标package（如果指定了）
-                boolean shouldDecompile = targetPackage == null || containsTargetPackage(tempJar.getAbsolutePath(), targetPackage);
+                for (String nestedJarPath : nestedJarPaths) {
+                    ZipEntry entry = zipFile.getEntry(nestedJarPath);
+                    if (entry == null) {
+                        continue;
+                    }
 
-                if (shouldDecompile) {
+                    String jarFileName = nestedJarPath.substring(nestedJarPath.lastIndexOf('/') + 1);
+                    String dirPath = nestedJarPath.substring(0, nestedJarPath.lastIndexOf('/'));
+
+                    tempDir.mkdirs();
+                    File tempJar = new File(tempDir, jarFileName);
+
+                    try (InputStream is = zipFile.getInputStream(entry);
+                         FileOutputStream fos = new FileOutputStream(tempJar)) {
+                        byte[] buffer = new byte[4096];
+                        int bytesRead;
+                        while ((bytesRead = is.read(buffer)) != -1) {
+                            fos.write(buffer, 0, bytesRead);
+                        }
+                    }
+
                     try {
-                        System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
+                        boolean shouldDecompile = targetPackage == null || containsTargetPackage(tempJar.getAbsolutePath(), targetPackage);
 
-                        // 在父jar包输出目录下创建对应的目录结构
-                        File nestedOutputDir = new File(parentOutputDir, dirPath);
-                        nestedOutputDir.mkdirs();
+                        if (shouldDecompile) {
+                            try {
+                                System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
 
-                        // 嵌套jar包不再递归处理其内部的jar包，避免无限递归
-                        decompileJarToSpecificDir(tempJar.getAbsolutePath(), nestedOutputDir.getAbsolutePath(), jarFileName, true, targetPackage);
-                    } catch (Exception e) {
-                        System.err.println("[ERROR] Failed to decompile nested jar: " + nestedJarPath + " - " + e.getMessage());
+                                File nestedOutputDir = new File(parentOutputDir, dirPath);
+                                nestedOutputDir.mkdirs();
+
+                                decompileJarToSpecificDir(
+                                        tempJar.getAbsolutePath(),
+                                        nestedOutputDir.getAbsolutePath(),
+                                        jarFileName,
+                                        true,
+                                        targetPackage,
+                                        threadCount
+                                );
+                            } catch (Exception e) {
+                                System.err.println("[ERROR] Failed to decompile nested jar: " + nestedJarPath + " - " + e.getMessage());
+                            }
+                        } else {
+                            System.out.println("[NESTED JAR SKIPPED] " + nestedJarPath + " (does not contain target package)");
+                        }
+                    } finally {
+                        tempJar.delete();
                     }
-                } else {
-                    System.out.println("[NESTED JAR SKIPPED] " + nestedJarPath + " (does not contain target package)");
                 }
-
-                tempJar.delete();
             }
+        } finally {
+            deleteRecursively(tempDir.toPath());
         }
     }
 
-    private static void decompileJarToSpecificDir(String jarPath, String outputDir, String jarFileName, boolean isTargetJar, String targetPackage) throws IOException {
+    private static void decompileJarToSpecificDir(
+            String jarPath,
+            String outputDir,
+            String jarFileName,
+            boolean isTargetJar,
+            String targetPackage,
+            int threadCount
+    ) throws IOException {
         File output = new File(outputDir);
         output.mkdirs();
 
@@ -126,35 +227,76 @@ public class DecompileUtil {
         File outputJarDir = new File(outputDir, baseName + "_src");
         outputJarDir.mkdirs();
 
-        IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
-        Fernflower engine = createFernflower(saver);
-
-        engine.addSource(jarFile);
-        engine.decompileContext();
-        engine.clearContext();
+        if (targetPackage != null) {
+            decompileJarFiltered(jarFile, outputJarDir, targetPackage, threadCount);
+        } else {
+            IResultSaver saver = new ConsoleResultSaver(outputJarDir.getAbsolutePath());
+            Fernflower engine = createFernflower(saver, threadCount);
+            try {
+                engine.addSource(jarFile);
+                engine.decompileContext();
+            } finally {
+                engine.clearContext();
+            }
+        }
 
         if (isTargetJar) {
             copyNonClassFiles(jarPath, outputJarDir.getAbsolutePath());
         }
     }
 
-    private static boolean containsTargetPackage(String jarPath, String targetPackage) {
+    public static boolean containsTargetPackage(String jarPath, String targetPackage) {
         if (targetPackage == null) {
             return true;
         }
 
-        String packageName = targetPackage.replace('.', '/');
-        String entryName = packageName + "/";
+        String pkg = targetPackage.replace('.', '/') + "/";
+        String[] prefixes = {pkg, "BOOT-INF/classes/" + pkg, "WEB-INF/classes/" + pkg};
+        List<String> nestedJarNames = new ArrayList<>();
 
         try (java.util.jar.JarFile jarFile = new java.util.jar.JarFile(jarPath)) {
-            return jarFile.stream()
-                    .anyMatch(entry -> entry.getName().startsWith(entryName));
+            Enumeration<java.util.jar.JarEntry> entries = jarFile.entries();
+            while (entries.hasMoreElements()) {
+                java.util.jar.JarEntry entry = entries.nextElement();
+                String name = entry.getName();
+                for (String p : prefixes) {
+                    if (name.startsWith(p)) {
+                        return true;
+                    }
+                }
+                if (!entry.isDirectory() && name.endsWith(".jar")
+                        && (name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/"))) {
+                    nestedJarNames.add(name);
+                }
+            }
+
+            for (String nested : nestedJarNames) {
+                java.util.jar.JarEntry ne = jarFile.getJarEntry(nested);
+                if (ne == null) {
+                    continue;
+                }
+                try (InputStream is = jarFile.getInputStream(ne);
+                     ZipInputStream zis = new ZipInputStream(is)) {
+                    ZipEntry inner;
+                    while ((inner = zis.getNextEntry()) != null) {
+                        if (inner.getName().startsWith(pkg)) {
+                            return true;
+                        }
+                    }
+                } catch (IOException ignore) {
+                }
+            }
         } catch (IOException e) {
             return false;
         }
+        return false;
     }
 
     public static void decompileClassFileInPlace(String classPath) throws IOException {
+        decompileClassFileInPlace(classPath, 1);
+    }
+
+    public static void decompileClassFileInPlace(String classPath, int threadCount) throws IOException {
         File classFile = new File(classPath);
         if (!classFile.exists() || !classFile.isFile()) {
             throw new FileNotFoundException("Class file not found: " + classPath);
@@ -165,10 +307,14 @@ public class DecompileUtil {
             outputDir = new File(".");
         }
 
-        decompileSourcesInPlace(Collections.singletonList(classFile), outputDir);
+        decompileSourcesInPlace(Collections.singletonList(classFile), outputDir, threadCount);
     }
 
     public static void decompileClassDirectoryInPlace(String directoryPath) throws IOException {
+        decompileClassDirectoryInPlace(directoryPath, 1);
+    }
+
+    public static void decompileClassDirectoryInPlace(String directoryPath, int threadCount) throws IOException {
         File dir = new File(directoryPath);
         if (!dir.exists() || !dir.isDirectory()) {
             throw new IOException("Directory not found: " + directoryPath);
@@ -177,7 +323,13 @@ public class DecompileUtil {
         List<File> classFiles = new ArrayList<>();
         try (Stream<Path> stream = Files.walk(dir.toPath())) {
             stream.filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".class"))
+                    .filter(path -> {
+                        String str = path.toString();
+                        return !str.contains(".java-decompile")
+                                && !str.contains(".woodpecker")
+                                && !str.contains("target" + File.separator + "classes")
+                                && str.endsWith(".class");
+                    })
                     .forEach(path -> classFiles.add(path.toFile()));
         }
 
@@ -185,40 +337,41 @@ public class DecompileUtil {
             throw new IOException("No .class files found under directory: " + directoryPath);
         }
 
-        decompileSourcesInPlace(classFiles, dir);
+        decompileSourcesInPlace(classFiles, dir, threadCount);
     }
 
-    private static void decompileSourcesInPlace(List<File> sources, File outputDir) throws IOException {
+    private static void decompileSourcesInPlace(List<File> sources, File outputDir, int threadCount) throws IOException {
         if (sources.isEmpty()) {
             return;
         }
 
+        IResultSaver saver = new ConsoleResultSaver(outputDir.getAbsolutePath());
+        Fernflower engine = createFernflower(saver, threadCount);
         try {
-            IResultSaver saver = new ConsoleResultSaver(outputDir.getAbsolutePath());
-            Fernflower engine = createFernflower(saver);
             for (File source : sources) {
                 engine.addSource(source);
             }
             engine.decompileContext();
-            engine.clearContext();
         } catch (Exception | OutOfMemoryError e) {
             throw new IOException("Decompilation failed: " + e.getMessage(), e);
+        } finally {
+            engine.clearContext();
         }
     }
-    
+
     private static void copyNonClassFiles(String jarPath, String outputDir) throws IOException {
         try (ZipFile zipFile = new ZipFile(jarPath)) {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
 
+            byte[] buffer = new byte[4096];
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 String name = entry.getName();
 
-                // 跳过class文件、目录、META-INF和嵌套的jar包
                 if (name.endsWith(".class") || name.endsWith("/") ||
-                    name.equals("META-INF/") || name.startsWith("META-INF/MANIFEST.MF") ||
-                    name.startsWith("META-INF/") ||
-                    (name.endsWith(".jar") && (name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/")))) {
+                        name.equals("META-INF/") || name.startsWith("META-INF/MANIFEST.MF") ||
+                        name.startsWith("META-INF/") ||
+                        (name.endsWith(".jar") && (name.startsWith("BOOT-INF/lib/") || name.startsWith("WEB-INF/lib/") || name.startsWith("lib/")))) {
                     continue;
                 }
 
@@ -227,7 +380,6 @@ public class DecompileUtil {
                     outputFile.getParentFile().mkdirs();
                     try (InputStream is = zipFile.getInputStream(entry);
                          FileOutputStream os = new FileOutputStream(outputFile)) {
-                        byte[] buffer = new byte[4096];
                         int bytesRead;
                         while ((bytesRead = is.read(buffer)) != -1) {
                             os.write(buffer, 0, bytesRead);
@@ -240,7 +392,7 @@ public class DecompileUtil {
         }
     }
 
-    private static Fernflower createFernflower(IResultSaver saver) {
+    private static Fernflower createFernflower(IResultSaver saver, int threadCount) {
         Map<String, Object> options = new HashMap<>();
         options.put(IFernflowerPreferences.REMOVE_BRIDGE, "0");
         options.put(IFernflowerPreferences.DUMP_CODE_LINES, "1");
@@ -260,12 +412,15 @@ public class DecompileUtil {
         options.put(IFernflowerPreferences.REMOVE_GET_CLASS_NEW, "1");
         options.put(IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES, "1");
         options.put(IFernflowerPreferences.SKIP_EXTRA_FILES, "1");
+        options.put(IFernflowerPreferences.THREADS, String.valueOf(Math.max(1, threadCount)));
 
         return new Fernflower(saver, options, new IFernflowerLogger() {
             @Override
             public void writeMessage(String message, Severity severity) {
                 if (severity == Severity.ERROR) {
                     System.err.println("[Vineflower] " + message);
+                } else if (severity == Severity.WARN) {
+                    System.out.println("[Vineflower WARN] " + message);
                 }
             }
 
@@ -273,18 +428,20 @@ public class DecompileUtil {
             public void writeMessage(String message, Severity severity, Throwable t) {
                 if (severity == Severity.ERROR) {
                     System.err.println("[Vineflower] " + message + " - " + t.getMessage());
+                } else if (severity == Severity.WARN) {
+                    System.out.println("[Vineflower WARN] " + message + " - " + t.getMessage());
                 }
             }
         });
     }
-    
+
     private static class ConsoleResultSaver implements IResultSaver {
         private final String outputPath;
-        
-        public ConsoleResultSaver(String outputPath) {
+
+        private ConsoleResultSaver(String outputPath) {
             this.outputPath = outputPath;
         }
-        
+
         @Override
         public void saveFolder(String path) {
             new File(outputPath, path).mkdirs();

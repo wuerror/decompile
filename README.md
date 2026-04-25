@@ -139,6 +139,17 @@ decompile/
 mvn clean package -DskipTests
 ```
 
+## Concurrency Controls
+
+- `-j, --jobs`: archive-level parallelism for batch decompilation
+- `--vf-threads`: worker threads used inside each Vineflower task
+- Default for a single archive: `jobs=1`, `vf-threads=min(4, CPU)`
+- Default for batch directories: `jobs=min(4, max(1, CPU/2))`, `vf-threads=1`
+- When batch mode runs on a machine with `CPU >= 8` and JVM heap `>= 4G`, the default `vf-threads` is raised to `2`
+- Batch mode also uses an adaptive permit budget based on heap and archive size:
+  large jars can run alone, medium jars reduce parallelism, small jars keep concurrency high
+- Recommended for 100+ jars: `java -Xmx4G -jar target/decompile-1.0-SNAPSHOT.jar D:\path\to\libs -j 2 --vf-threads 1`
+
 ## License
 
 Apache 2.0

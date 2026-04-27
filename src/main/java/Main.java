@@ -320,7 +320,17 @@ public class Main {
                 TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(poolSize * 2),
                 Executors.defaultThreadFactory(),
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                (task, executor) -> {
+                    if (executor.isShutdown()) {
+                        throw new RejectedExecutionException("Executor has been shut down");
+                    }
+                    try {
+                        executor.getQueue().put(task);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RejectedExecutionException("Interrupted while waiting to submit task", e);
+                    }
+                }
         );
         pool.allowCoreThreadTimeOut(true);
         return pool;

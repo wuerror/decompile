@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import java.util.ArrayList;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
@@ -22,12 +23,16 @@ public class Main {
     private static final int PER_ARCHIVE_HEAP_MB = 512;
     private static final String HELP_EPILOG = String.join(System.lineSeparator(),
             "",
+            "Output directory:",
+            "  Directory input:  D:\\libs       -> D:\\libs_src\\",
+            "  Single JAR input: D:\\libs\\a.jar -> D:\\libs\\a_src\\",
+            "",
             "Examples:",
-            "  java -jar target/decompile-1.0-SNAPSHOT.jar D:\\libs",
-            "  java -jar target/decompile-1.0-SNAPSHOT.jar D:\\libs -tp com.example.app",
-            "  java -jar target/decompile-1.0-SNAPSHOT.jar D:\\libs -j 2 --vf-threads 1",
-            "  java -jar target/decompile-1.0-SNAPSHOT.jar D:\\classes\\Foo.class",
-            "  java -jar target/decompile-1.0-SNAPSHOT.jar D:\\classes"
+            "  java -jar decompile.jar D:\\libs",
+            "  java -jar decompile.jar D:\\libs -tp com.example.app",
+            "  java -jar decompile.jar D:\\libs -j 2 --vf-threads 1",
+            "  java -jar decompile.jar D:\\classes\\Foo.class",
+            "  java -jar decompile.jar D:\\classes"
     );
 
     private static String targetPackage = null;
@@ -92,11 +97,11 @@ public class Main {
         File inputFile = new File(path);
         boolean singlePathInput = inputFile.isFile();
 
-        // For class input, default vineflowerThreads to use all cores (single task)
+        // For class input, keep one CPU core available for the OS/user.
         int cpus = Runtime.getRuntime().availableProcessors();
         vineflowerThreads = requestedVineflowerThreads != null
                 ? requestedVineflowerThreads
-                : Math.max(1, Math.min(MAX_VF_THREADS, cpus));
+                : Math.max(1, Math.min(MAX_VF_THREADS, Math.max(1, cpus - 1)));
 
         // Handle single .class file directly
         if (inputFile.isFile() && inputFile.getName().endsWith(".class")) {
@@ -121,15 +126,16 @@ public class Main {
             resolveThreading(singlePathInput, requestedJobs, requestedVineflowerThreads);
             executor = createExecutor(archiveConcurrency);
 
-            File baseDir;
-
+            File decompileDir;
             if (inputFile.isFile()) {
-                baseDir = inputFile.getParentFile();
+                File parentDir = inputFile.getAbsoluteFile().getParentFile();
+                String jarBaseName = getArchiveBaseName(inputFile.getName());
+                decompileDir = new File(parentDir == null ? new File(".") : parentDir, jarBaseName + "_src");
             } else {
-                baseDir = inputFile;
+                File absoluteBaseDir = inputFile.getAbsoluteFile();
+                File parentDir = absoluteBaseDir.getParentFile();
+                decompileDir = new File(parentDir == null ? new File(".") : parentDir, absoluteBaseDir.getName() + "_src");
             }
-
-            File decompileDir = new File(baseDir, ".java-decompile");
             if (!decompileDir.exists()) {
                 decompileDir.mkdirs();
             }
@@ -271,7 +277,7 @@ public class Main {
             stream.filter(Files::isRegularFile)
                     .forEach(path -> {
                         String strPath = path.toString();
-                        if (strPath.contains(".java-decompile")
+                        if (hasPathSegmentEndingWith(strPath, "_src")
                                 || strPath.contains(".woodpecker")
                                 || strPath.contains("target" + File.separator + "classes")) {
                             return;
@@ -289,7 +295,17 @@ public class Main {
     }
 
     private static ThreadPoolExecutor createExecutor(int poolSize) {
-        return (ThreadPoolExecutor) Executors.newFixedThreadPool(poolSize);
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+                poolSize,
+                poolSize,
+                60L,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(poolSize * 2),
+                Executors.defaultThreadFactory(),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+        pool.allowCoreThreadTimeOut(true);
+        return pool;
     }
 
     private static void shutdownExecutor() {
@@ -322,7 +338,7 @@ public class Main {
             archiveConcurrency = 1;
             vineflowerThreads = requestedVfThreads != null
                     ? requestedVfThreads
-                    : Math.max(1, Math.min(MAX_VF_THREADS, cpus));
+                    : Math.max(1, Math.min(MAX_VF_THREADS, Math.max(1, cpus - 1)));
             return;
         }
 
@@ -337,7 +353,7 @@ public class Main {
 
         if (requestedJobs != null) {
             archiveConcurrency = requestedJobs;
-            vineflowerThreads = Math.max(1, Math.min(MAX_VF_THREADS, cpus / archiveConcurrency));
+            vineflowerThreads = 1;
             return;
         }
 
@@ -347,11 +363,9 @@ public class Main {
             return;
         }
 
-        // Auto: cap archive concurrency to avoid excessive disk I/O contention
-        int budget = Math.max(1, Math.min(maxByHeap, Math.min(cpus / 2 + 1, MAX_ARCHIVE_CONCURRENCY)));
-        int vf = Math.max(1, Math.min(MAX_VF_THREADS, cpus / budget));
+        int budget = Math.max(1, Math.min(maxByHeap, Math.min(Math.max(1, cpus - 2), MAX_ARCHIVE_CONCURRENCY)));
         archiveConcurrency = budget;
-        vineflowerThreads = vf;
+        vineflowerThreads = 1;
     }
 
     private static class ScanResult {
@@ -416,7 +430,10 @@ public class Main {
             String jarName = jarFile.getName();
             String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
 
-            File outputDir = new File(decompilePath, baseName + "_src");
+            File decompileDir = new File(decompilePath);
+            File outputDir = decompileDir.getName().equals(baseName + "_src")
+                    ? decompileDir
+                    : new File(decompileDir, baseName + "_src");
 
             if (outputDir.exists() && outputDir.isDirectory()) {
                 File[] files = outputDir.listFiles();
@@ -443,5 +460,24 @@ public class Main {
         }
 
         return sizeBytes + "B";
+    }
+
+    private static boolean hasPathSegmentEndingWith(String path, String suffix) {
+        for (String segment : path.split("[/\\\\]")) {
+            if (segment.endsWith(suffix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String getArchiveBaseName(String fileName) {
+        if (fileName.endsWith(".war")) {
+            return fileName.substring(0, fileName.length() - 4);
+        }
+        if (fileName.endsWith(".jar")) {
+            return fileName.substring(0, fileName.length() - 4);
+        }
+        return fileName;
     }
 }

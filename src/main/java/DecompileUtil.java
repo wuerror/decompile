@@ -42,7 +42,10 @@ public class DecompileUtil {
         File jarFile = new File(jarPath);
         String jarName = jarFile.getName();
         String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
-        File outputJarDir = new File(outputDir, baseName + "_src");
+        File outputRoot = new File(outputDir);
+        File outputJarDir = outputRoot.getName().equals(baseName + "_src")
+                ? outputRoot
+                : new File(outputRoot, baseName + "_src");
         outputJarDir.mkdirs();
 
         if (targetPackage != null) {
@@ -325,7 +328,7 @@ public class DecompileUtil {
             stream.filter(Files::isRegularFile)
                     .filter(path -> {
                         String str = path.toString();
-                        return !str.contains(".java-decompile")
+                        return !hasPathSegmentEndingWith(str, "_src")
                                 && !str.contains(".woodpecker")
                                 && !str.contains("target" + File.separator + "classes")
                                 && str.endsWith(".class");
@@ -503,5 +506,14 @@ public class DecompileUtil {
         @Override
         public void close() throws IOException {
         }
+    }
+
+    private static boolean hasPathSegmentEndingWith(String path, String suffix) {
+        for (String segment : path.split("[/\\\\]")) {
+            if (segment.endsWith(suffix)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

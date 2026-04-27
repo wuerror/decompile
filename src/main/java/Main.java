@@ -4,17 +4,27 @@ import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 import java.util.ArrayList;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 public class Main {
@@ -40,6 +50,9 @@ public class Main {
     private static final AtomicInteger skippedCount = new AtomicInteger(0);
     private static final AtomicInteger failedCount = new AtomicInteger(0);
     private static final AtomicInteger activeArchiveTasks = new AtomicInteger(0);
+    private static final AtomicInteger dedupSymlinkCount = new AtomicInteger(0);
+    private static final AtomicInteger dedupCopyCount = new AtomicInteger(0);
+    private static final ConcurrentHashMap<String, CompletableFuture<Path>> hashToOutputDir = new ConcurrentHashMap<>();
 
     private static ThreadPoolExecutor executor;
     private static int archiveConcurrency = 1;
@@ -175,6 +188,11 @@ public class Main {
         System.out.println("Decompilation completed!");
         System.out.println("Processed: " + processedCount.get() + " files");
         System.out.println("Skipped: " + skippedCount.get() + " files");
+        int symlinks = dedupSymlinkCount.get();
+        int copies = dedupCopyCount.get();
+        if (symlinks + copies > 0) {
+            System.out.println("Dedup: " + (symlinks + copies) + " files (symlink: " + symlinks + ", copy: " + copies + ")");
+        }
         if (failedCount.get() > 0) {
             System.out.println("Failed: " + failedCount.get() + " files");
         }
@@ -403,6 +421,56 @@ public class Main {
                 return null;
             }
 
+            Path outputDir = resolveOutputDir(jarPath, decompilePath);
+            String hash;
+            try {
+                hash = sha256(Path.of(jarPath));
+            } catch (Exception e) {
+                hash = null;
+            }
+
+            if (hash != null) {
+                while (true) {
+                    CompletableFuture<Path> ownedFuture = new CompletableFuture<>();
+                    CompletableFuture<Path> existingFuture = hashToOutputDir.putIfAbsent(hash, ownedFuture);
+                    if (existingFuture == null) {
+                        return decompileArchive(isTargetJar, hash, outputDir, ownedFuture);
+                    }
+
+                    try {
+                        Path existingOutput = existingFuture.get();
+                        if (existingOutput.equals(outputDir)) {
+                            skippedCount.incrementAndGet();
+                            System.out.println("[DEDUP] " + outputDir.getFileName() + " -> reused existing output");
+                            return null;
+                        }
+
+                        linkOrCopy(existingOutput, outputDir, hash);
+                        skippedCount.incrementAndGet();
+                        return null;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        failedCount.incrementAndGet();
+                        System.err.println("[ERROR] Dedup wait interrupted: " + jarPath + " - " + e.getMessage());
+                        return null;
+                    } catch (ExecutionException e) {
+                        hashToOutputDir.remove(hash, existingFuture);
+                    } catch (IOException e) {
+                        System.err.println("[DEDUP FAILED] " + jarPath + " - " + e.getMessage() + ", falling back to decompile");
+                        return decompileArchive(isTargetJar, null, outputDir, null);
+                    }
+                }
+            }
+
+            return decompileArchive(isTargetJar, null, outputDir, null);
+        }
+
+        private Void decompileArchive(
+                boolean isTargetJar,
+                String hash,
+                Path outputDir,
+                CompletableFuture<Path> ownedFuture
+        ) {
             int active = activeArchiveTasks.incrementAndGet();
             try {
                 System.out.println("[START] " + jarPath
@@ -412,11 +480,17 @@ public class Main {
                 DecompileUtil.decompileJar(jarPath, decompilePath, isTargetJar, targetPackage, vineflowerThreads);
                 processedCount.incrementAndGet();
                 System.out.println("[DECOMPILED] " + jarPath);
+
+                if (ownedFuture != null) {
+                    ownedFuture.complete(outputDir);
+                }
             } catch (OutOfMemoryError e) {
+                failOwnedFuture(hash, ownedFuture, e);
                 failedCount.incrementAndGet();
                 System.err.println("[ERROR] Failed to decompile: " + jarPath + " - Out of memory");
                 System.err.println("[HINT] Try reducing -j or --vf-threads, or increasing heap with -Xmx");
             } catch (Exception e) {
+                failOwnedFuture(hash, ownedFuture, e);
                 failedCount.incrementAndGet();
                 System.err.println("[ERROR] Failed to decompile: " + jarPath + " - " + e.getMessage());
             } finally {
@@ -425,7 +499,15 @@ public class Main {
             return null;
         }
 
-        private boolean isAlreadyDecompiled(String jarPath, String decompilePath) {
+        private void failOwnedFuture(String hash, CompletableFuture<Path> ownedFuture, Throwable error) {
+            if (ownedFuture == null) {
+                return;
+            }
+            ownedFuture.completeExceptionally(error);
+            hashToOutputDir.remove(hash, ownedFuture);
+        }
+
+        private static Path resolveOutputDir(String jarPath, String decompilePath) {
             File jarFile = new File(jarPath);
             String jarName = jarFile.getName();
             String baseName = jarName.endsWith(".war") ? jarName.replace(".war", "") : jarName.replace(".jar", "");
@@ -434,10 +516,18 @@ public class Main {
             File outputDir = decompileDir.getName().equals(baseName + "_src")
                     ? decompileDir
                     : new File(decompileDir, baseName + "_src");
+            return outputDir.toPath();
+        }
 
-            if (outputDir.exists() && outputDir.isDirectory()) {
-                File[] files = outputDir.listFiles();
-                return files != null && files.length > 0;
+        private boolean isAlreadyDecompiled(String jarPath, String decompilePath) {
+            Path outputDir = resolveOutputDir(jarPath, decompilePath);
+
+            if (Files.isDirectory(outputDir) || Files.isSymbolicLink(outputDir)) {
+                try (Stream<Path> contents = Files.list(outputDir)) {
+                    return contents.findFirst().isPresent();
+                } catch (IOException e) {
+                    return false;
+                }
             }
 
             return false;
@@ -479,5 +569,51 @@ public class Main {
             return fileName.substring(0, fileName.length() - 4);
         }
         return fileName;
+    }
+
+    private static String sha256(Path file) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            try (InputStream is = new BufferedInputStream(Files.newInputStream(file))) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) != -1) {
+                    md.update(buf, 0, n);
+                }
+            }
+            return HexFormat.of().formatHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("SHA-256 not available", e);
+        }
+    }
+
+    private static void linkOrCopy(Path existing, Path link, String hash) throws IOException {
+        String jarName = link.getFileName().toString();
+        String hashPrefix = hash.substring(0, Math.min(8, hash.length()));
+        try {
+            Files.createSymbolicLink(link, existing);
+            dedupSymlinkCount.incrementAndGet();
+            System.out.println("[DEDUP] " + jarName + " -> symlink to existing (hash: " + hashPrefix + "...)");
+        } catch (IOException | UnsupportedOperationException e) {
+            copyDirectoryRecursively(existing, link);
+            dedupCopyCount.incrementAndGet();
+            System.out.println("[DEDUP] " + jarName + " -> copied from existing (symlink not supported)");
+        }
+    }
+
+    private static void copyDirectoryRecursively(Path source, Path target) throws IOException {
+        Files.walkFileTree(source, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                Files.createDirectories(target.resolve(source.relativize(dir)));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.copy(file, target.resolve(source.relativize(file)), StandardCopyOption.REPLACE_EXISTING);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 }

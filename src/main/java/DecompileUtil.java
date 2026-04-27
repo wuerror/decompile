@@ -184,12 +184,12 @@ public class DecompileUtil {
                         boolean shouldDecompile = targetPackage == null || containsTargetPackage(tempJar.getAbsolutePath(), targetPackage);
 
                         if (shouldDecompile) {
+                            System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
+
+                            File nestedOutputDir = new File(parentOutputDir, dirPath);
+                            nestedOutputDir.mkdirs();
+
                             try {
-                                System.out.println("[NESTED JAR] Decompiling: " + nestedJarPath);
-
-                                File nestedOutputDir = new File(parentOutputDir, dirPath);
-                                nestedOutputDir.mkdirs();
-
                                 decompileJarToSpecificDir(
                                         tempJar.getAbsolutePath(),
                                         nestedOutputDir.getAbsolutePath(),
@@ -199,7 +199,7 @@ public class DecompileUtil {
                                         threadCount
                                 );
                             } catch (Exception e) {
-                                System.err.println("[ERROR] Failed to decompile nested jar: " + nestedJarPath + " - " + e.getMessage());
+                                throw new IOException("Failed to decompile nested jar: " + nestedJarPath, e);
                             }
                         } else {
                             System.out.println("[NESTED JAR SKIPPED] " + nestedJarPath + " (does not contain target package)");
@@ -457,7 +457,7 @@ public class DecompileUtil {
                 dest.getParentFile().mkdirs();
                 Files.copy(Paths.get(source), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException e) {
-                System.err.println("[ERROR] Failed to copy file: " + source + " - " + e.getMessage());
+                throw new UncheckedIOException("Failed to copy file: " + source, e);
             }
         }
 
@@ -470,7 +470,7 @@ public class DecompileUtil {
                     writer.write(content);
                 }
             } catch (IOException e) {
-                System.err.println("[ERROR] Failed to save class file: " + qualifiedName + " - " + e.getMessage());
+                throw new UncheckedIOException("Failed to save class file: " + qualifiedName, e);
             }
         }
 
@@ -495,7 +495,7 @@ public class DecompileUtil {
                     writer.write(content);
                 }
             } catch (IOException e) {
-                System.err.println("[ERROR] Failed to save class entry: " + qualifiedName + " - " + e.getMessage());
+                throw new UncheckedIOException("Failed to save class entry: " + qualifiedName, e);
             }
         }
 

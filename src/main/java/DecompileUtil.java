@@ -313,6 +313,45 @@ public class DecompileUtil {
         decompileSourcesInPlace(Collections.singletonList(classFile), outputDir, threadCount);
     }
 
+    public static void decompileClassDirectory(String sourcePath, String outputPath, int threadCount) throws IOException {
+        File dir = new File(sourcePath);
+        if (!dir.exists() || !dir.isDirectory()) {
+            throw new IOException("Directory not found: " + sourcePath);
+        }
+
+        List<File> classFiles = new ArrayList<>();
+        try (Stream<Path> stream = Files.walk(dir.toPath())) {
+            stream.filter(Files::isRegularFile)
+                    .filter(path -> {
+                        String str = path.toString();
+                        return !hasPathSegmentEndingWith(str, "_src")
+                                && !str.contains(".woodpecker")
+                                && !str.contains("target" + File.separator + "classes")
+                                && str.endsWith(".class");
+                    })
+                    .forEach(path -> classFiles.add(path.toFile()));
+        }
+
+        if (classFiles.isEmpty()) {
+            throw new IOException("No .class files found under directory: " + sourcePath);
+        }
+
+        File outputDir = new File(outputPath);
+        outputDir.mkdirs();
+        IResultSaver saver = new ConsoleResultSaver(outputDir.getAbsolutePath());
+        Fernflower engine = createFernflower(saver, threadCount);
+        try {
+            for (File source : classFiles) {
+                engine.addSource(source);
+            }
+            engine.decompileContext();
+        } catch (Exception | OutOfMemoryError e) {
+            throw new IOException("Decompilation failed: " + e.getMessage(), e);
+        } finally {
+            engine.clearContext();
+        }
+    }
+
     public static void decompileClassDirectoryInPlace(String directoryPath) throws IOException {
         decompileClassDirectoryInPlace(directoryPath, 1);
     }
@@ -464,7 +503,10 @@ public class DecompileUtil {
         @Override
         public void saveClassFile(String path, String qualifiedName, String entryName, String content, int[] mapping) {
             try {
-                File file = new File(outputPath, path + "/" + entryName);
+                String effectivePath = (path == null || path.isEmpty()) && qualifiedName != null && qualifiedName.contains("/")
+                        ? qualifiedName.substring(0, qualifiedName.lastIndexOf('/'))
+                        : path;
+                File file = new File(outputPath, effectivePath + "/" + entryName);
                 file.getParentFile().mkdirs();
                 try (Writer writer = new OutputStreamWriter(new FileOutputStream(file), java.nio.charset.StandardCharsets.UTF_8)) {
                     writer.write(content);

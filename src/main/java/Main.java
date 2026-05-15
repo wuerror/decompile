@@ -169,10 +169,10 @@ public class Main {
                 processDirectory(decompileDir.getAbsolutePath(), scanResult);
             }
 
-            // Handle mixed directory: process loose .class files alongside archives
+            // Handle mixed directory: decompile loose .class files into decompileDir/classes/
             if (scanResult != null && scanResult.hasArchives && scanResult.classCount > 0) {
                 System.out.println("Processing " + scanResult.classCount + " loose .class files...");
-                processClassDirectory(inputFile, scanResult.classCount);
+                decompileClassesToOutputDir(inputFile, decompileDir, scanResult.classCount);
             }
         }
 
@@ -223,9 +223,12 @@ public class Main {
         scanResult.archives.sort(Comparator.comparingLong(ArchiveTaskMetadata::sizeBytes).reversed());
 
         for (ArchiveTaskMetadata archive : scanResult.archives) {
+            String subDecompilePath = archive.relativeDirPath().isEmpty()
+                    ? decompilePath
+                    : new File(decompilePath, archive.relativeDirPath()).getAbsolutePath();
             futures.add(executor.submit(new DecompileTask(
                     archive.jarPath(),
-                    decompilePath,
+                    subDecompilePath,
                     archive.sizeBytes()
             )));
         }
@@ -288,6 +291,21 @@ public class Main {
         }
     }
 
+    private static void decompileClassesToOutputDir(File sourceDir, File outputBaseDir, int classCount) {
+        File classesOutputDir = new File(outputBaseDir, "classes");
+        classesOutputDir.mkdirs();
+        System.out.println("Output directory: " + classesOutputDir.getAbsolutePath());
+
+        try {
+            DecompileUtil.decompileClassDirectory(sourceDir.getAbsolutePath(), classesOutputDir.getAbsolutePath(), vineflowerThreads);
+            processedCount.addAndGet(classCount);
+            System.out.println("[DECOMPILED CLASS DIR] " + sourceDir.getAbsolutePath() + " -> " + classesOutputDir.getAbsolutePath() + " (" + classCount + " classes)");
+        } catch (Exception e) {
+            failedCount.incrementAndGet();
+            System.err.println("[ERROR] Failed to decompile directory: " + sourceDir.getAbsolutePath() + " - " + e.getMessage());
+        }
+    }
+
     private static ScanResult scanDirectory(Path directoryPath) throws IOException {
         ScanResult result = new ScanResult();
 
@@ -302,7 +320,8 @@ public class Main {
                         }
                         if (strPath.endsWith(".jar") || strPath.endsWith(".war")) {
                             result.hasArchives = true;
-                            result.archives.add(new ArchiveTaskMetadata(strPath, path.toFile().length()));
+                            String relDir = directoryPath.relativize(path.getParent()).toString();
+                            result.archives.add(new ArchiveTaskMetadata(strPath, path.toFile().length(), relDir));
                         } else if (strPath.endsWith(".class")) {
                             result.classCount++;
                         }
@@ -402,7 +421,7 @@ public class Main {
         private int classCount;
     }
 
-    private record ArchiveTaskMetadata(String jarPath, long sizeBytes) {
+    private record ArchiveTaskMetadata(String jarPath, long sizeBytes, String relativeDirPath) {
     }
 
     private static class DecompileTask implements Callable<Void> {

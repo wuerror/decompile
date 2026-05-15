@@ -9,6 +9,7 @@ out/
 *.zip
 *.tar.gz
 *.rar
+.m2/
 
 # IDEs
 .idea/

@@ -223,12 +223,9 @@ public class Main {
         scanResult.archives.sort(Comparator.comparingLong(ArchiveTaskMetadata::sizeBytes).reversed());
 
         for (ArchiveTaskMetadata archive : scanResult.archives) {
-            String subDecompilePath = archive.relativeDirPath().isEmpty()
-                    ? decompilePath
-                    : new File(decompilePath, archive.relativeDirPath()).getAbsolutePath();
             futures.add(executor.submit(new DecompileTask(
                     archive.jarPath(),
-                    subDecompilePath,
+                    decompilePath,
                     archive.sizeBytes()
             )));
         }
@@ -292,7 +289,7 @@ public class Main {
     }
 
     private static void decompileClassesToOutputDir(File sourceDir, File outputBaseDir, int classCount) {
-        File classesOutputDir = new File(outputBaseDir, "classes");
+        File classesOutputDir = new File(outputBaseDir, "classes_src");
         classesOutputDir.mkdirs();
         System.out.println("Output directory: " + classesOutputDir.getAbsolutePath());
 
@@ -320,8 +317,7 @@ public class Main {
                         }
                         if (strPath.endsWith(".jar") || strPath.endsWith(".war")) {
                             result.hasArchives = true;
-                            String relDir = directoryPath.relativize(path.getParent()).toString();
-                            result.archives.add(new ArchiveTaskMetadata(strPath, path.toFile().length(), relDir));
+                            result.archives.add(new ArchiveTaskMetadata(strPath, path.toFile().length()));
                         } else if (strPath.endsWith(".class")) {
                             result.classCount++;
                         }
@@ -421,7 +417,7 @@ public class Main {
         private int classCount;
     }
 
-    private record ArchiveTaskMetadata(String jarPath, long sizeBytes, String relativeDirPath) {
+    private record ArchiveTaskMetadata(String jarPath, long sizeBytes) {
     }
 
     private static class DecompileTask implements Callable<Void> {

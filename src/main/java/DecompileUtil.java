@@ -492,7 +492,7 @@ public class DecompileUtil {
         @Override
         public void copyFile(String source, String path, String entryName) {
             try {
-                File dest = new File(outputPath, path + "/" + entryName);
+                File dest = resolveOutputFile(path, null, entryName);
                 dest.getParentFile().mkdirs();
                 Files.copy(Paths.get(source), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException e) {
@@ -503,10 +503,7 @@ public class DecompileUtil {
         @Override
         public void saveClassFile(String path, String qualifiedName, String entryName, String content, int[] mapping) {
             try {
-                String effectivePath = (path == null || path.isEmpty()) && qualifiedName != null && qualifiedName.contains("/")
-                        ? qualifiedName.substring(0, qualifiedName.lastIndexOf('/'))
-                        : path;
-                File file = new File(outputPath, effectivePath + "/" + entryName);
+                File file = resolveOutputFile(path, qualifiedName, entryName);
                 file.getParentFile().mkdirs();
                 try (Writer writer = new OutputStreamWriter(new FileOutputStream(file), java.nio.charset.StandardCharsets.UTF_8)) {
                     writer.write(content);
@@ -531,7 +528,7 @@ public class DecompileUtil {
         @Override
         public void saveClassEntry(String path, String archiveName, String qualifiedName, String entryName, String content) {
             try {
-                File file = new File(outputPath, path + "/" + entryName);
+                File file = resolveOutputFile(path, qualifiedName, entryName);
                 file.getParentFile().mkdirs();
                 try (Writer writer = new OutputStreamWriter(new FileOutputStream(file), java.nio.charset.StandardCharsets.UTF_8)) {
                     writer.write(content);
@@ -547,6 +544,29 @@ public class DecompileUtil {
 
         @Override
         public void close() throws IOException {
+        }
+
+        private File resolveOutputFile(String path, String qualifiedName, String entryName) {
+            String normalizedEntry = normalizePath(entryName);
+            if (normalizedEntry.contains("/")) {
+                return new File(outputPath, normalizedEntry);
+            }
+
+            String effectivePath = normalizePath(path);
+            if (effectivePath.isEmpty() && qualifiedName != null && qualifiedName.contains("/")) {
+                effectivePath = qualifiedName.substring(0, qualifiedName.lastIndexOf('/'));
+            }
+
+            return effectivePath.isEmpty()
+                    ? new File(outputPath, normalizedEntry)
+                    : new File(outputPath, effectivePath + "/" + normalizedEntry);
+        }
+
+        private String normalizePath(String value) {
+            if (value == null || value.isEmpty()) {
+                return "";
+            }
+            return value.replace('\\', '/').replaceAll("^/+", "").replaceAll("/+$", "");
         }
     }
 

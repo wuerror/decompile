@@ -1,5 +1,6 @@
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.helper.HelpScreenException;
+import net.sourceforge.argparse4j.impl.Arguments;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
@@ -27,6 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
+import com.inferpkg.core.PackageInferencer;
+import com.inferpkg.core.FatJarExtractor;
+
 public class Main {
     private static final int MAX_VF_THREADS = 4;
     private static final int MAX_ARCHIVE_CONCURRENCY = 8;
@@ -40,12 +44,14 @@ public class Main {
             "Examples:",
             "  java -jar decompile.jar D:\\libs",
             "  java -jar decompile.jar D:\\libs -tp com.example.app",
+            "  java -jar decompile.jar D:\\libs -smart",
             "  java -jar decompile.jar D:\\libs -j 2 --vf-threads 1",
             "  java -jar decompile.jar D:\\classes\\Foo.class",
             "  java -jar decompile.jar D:\\classes"
     );
 
     private static String targetPackage = null;
+    private static boolean smart = false;
     private static final AtomicInteger processedCount = new AtomicInteger(0);
     private static final AtomicInteger skippedCount = new AtomicInteger(0);
     private static final AtomicInteger failedCount = new AtomicInteger(0);
@@ -69,6 +75,10 @@ public class Main {
         parser.addArgument("-tp", "--target-package")
                 .required(false)
                 .help("Target package name - only decompile JARs containing this package (skip third-party JARs)");
+        parser.addArgument("-smart", "--smart")
+                .action(Arguments.storeTrue())
+                .required(false)
+                .help("Auto-infer business package name instead of manually specifying via -tp");
         parser.addArgument("-j", "--jobs")
                 .dest("jobs")
                 .type(Integer.class)
@@ -94,6 +104,19 @@ public class Main {
 
         String path = (String) ns.get("path");
         targetPackage = (String) ns.get("target_package");
+
+        Boolean smartVal = ns.getBoolean("smart");
+        smart = smartVal != null && smartVal;
+
+        if (smart && targetPackage != null) {
+            System.err.println("[ERROR] -smart and -tp cannot be used together");
+            System.exit(1);
+            return;
+        }
+
+        if (smart) {
+            targetPackage = inferBusinessPackage(path);
+        }
 
         Integer requestedJobs = ns.getInt("jobs");
         Integer requestedVineflowerThreads = ns.getInt("vineflower_threads");
@@ -640,5 +663,109 @@ public class Main {
                 return FileVisitResult.CONTINUE;
             }
         });
+    }
+
+    private static String inferBusinessPackage(String inputPath) {
+        List<String> sources = collectSourcesForInference(inputPath);
+        if (sources.isEmpty()) {
+            System.out.println("[SMART] No JAR/WAR files or class directories found for inference");
+            return null;
+        }
+
+        FatJarExtractor extractor = new FatJarExtractor();
+        List<String> resolvedSources = resolveFatJarsForInference(sources, extractor);
+
+        PackageInferencer inferencer = new PackageInferencer();
+        String inferred = inferencer.inferBasePackage(resolvedSources);
+
+        extractor.cleanup();
+
+        if (inferred != null) {
+            System.out.println("[SMART] Inferred business package: " + inferred);
+        } else {
+            System.out.println("[SMART] Could not infer business package, proceeding without package filter");
+        }
+
+        return inferred;
+    }
+
+    private static List<String> collectSourcesForInference(String inputPath) {
+        List<String> sources = new ArrayList<>();
+        File target = new File(inputPath);
+
+        if (!target.exists()) {
+            return sources;
+        }
+
+        if (target.isFile()) {
+            String name = target.getName().toLowerCase();
+            if (name.endsWith(".jar") || name.endsWith(".war")) {
+                sources.add(target.getAbsolutePath());
+            } else if (name.endsWith(".class")) {
+                System.out.println("[SMART] Single .class file input, smart mode not applicable - skipping inference");
+            }
+        } else if (target.isDirectory()) {
+            collectArchivesForInference(target, sources);
+            if (sources.isEmpty() && containsClassFiles(target)) {
+                sources.add(target.getAbsolutePath());
+            }
+        }
+
+        return sources;
+    }
+
+    private static void collectArchivesForInference(File dir, List<String> sources) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+
+        for (File f : files) {
+            if (f.isDirectory()) {
+                String name = f.getName();
+                if (name.endsWith("_src") || name.contains(".woodpecker")) {
+                    continue;
+                }
+                collectArchivesForInference(f, sources);
+            } else {
+                String name = f.getName().toLowerCase();
+                if (name.endsWith(".jar") || name.endsWith(".war")) {
+                    sources.add(f.getAbsolutePath());
+                }
+            }
+        }
+    }
+
+    private static boolean containsClassFiles(File dir) {
+        return containsClassFiles(dir, 0);
+    }
+
+    private static boolean containsClassFiles(File dir, int depth) {
+        if (depth > 3) return false;
+        File[] files = dir.listFiles();
+        if (files == null) return false;
+
+        for (File f : files) {
+            if (f.isDirectory()) {
+                if (containsClassFiles(f, depth + 1)) return true;
+            } else if (f.getName().endsWith(".class")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<String> resolveFatJarsForInference(List<String> sources, FatJarExtractor extractor) {
+        List<String> resolved = new ArrayList<>();
+        for (String source : sources) {
+            String lower = source.toLowerCase();
+            if ((lower.endsWith(".jar") || lower.endsWith(".war")) && extractor.isFatJar(source)) {
+                String extracted = extractor.extractClassesToTemp(source);
+                if (extracted != null) {
+                    resolved.add(extracted);
+                    continue;
+                }
+            }
+            resolved.add(source);
+        }
+        return resolved;
     }
 }
